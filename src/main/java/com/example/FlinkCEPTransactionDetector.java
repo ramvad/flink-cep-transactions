@@ -15,16 +15,20 @@ import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.time.Time;
 import org.slf4j.LoggerFactory;
+
+import com.example.config.FlinkJobConfig;
+import com.example.source.TransactionSourceFactory;
+
 import org.slf4j.Logger;
 import org.apache.flink.configuration.Configuration;
 
-
+import java.lang.invoke.MethodHandles;
 import java.time.Duration;
 import java.util.List;
 
 public class FlinkCEPTransactionDetector {
 
-    private static final Logger LOG = LoggerFactory.getLogger(FlinkCEPTransactionDetector.class);
+     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
 
     public static class Transaction {
         public String accountId;
@@ -46,23 +50,18 @@ public class FlinkCEPTransactionDetector {
     }
 
     public static void main(String[] args) throws Exception {
-        
- System.out.println(">>> FlinkCEPTransactionDetector start");
+
         LOG.info(">>> FlinkCEPTransactionDetector starting...");
         
-        Configuration config = new Configuration();
-        StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(config);
- 
+      FlinkJobConfig config = new FlinkJobConfig();
+        StreamExecutionEnvironment env = StreamExecutionEnvironment
+            .createLocalEnvironmentWithWebUI(config.getFlinkConfig());
 
-        // Create FileSource using TextLineFormat (Flink 1.17.1)
-        FileSource<String> source = FileSource.forRecordStreamFormat(
-                new TextLineFormat(),
-                new Path("C:/Users/svgks/Downloads/flink-cep-transactions/transactions.csv")
-        ).build();
+        FileSource<String> fileSource = TransactionSourceFactory.createSource(config.getDataPath());
 
         // Create data stream from source, process once
         DataStream<String> input = env.fromSource(
-                source,
+                fileSource,
                 WatermarkStrategy.noWatermarks(),
                 "file-source"
         );
@@ -124,6 +123,6 @@ public class FlinkCEPTransactionDetector {
         alerts.print("ALERTS");
 
         env.execute("Flink CEP Transaction Pattern");
-        System.out.println(">>> FlinkCEPTransactionDetector ending");
+        LOG.info(">>> FlinkCEPTransactionDetector ending");
     }
 }
