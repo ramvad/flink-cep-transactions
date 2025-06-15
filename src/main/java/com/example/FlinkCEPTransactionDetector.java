@@ -2,15 +2,20 @@ package com.example;
 
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
 import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.serialization.SimpleStringEncoder;
+import org.apache.flink.api.connector.sink2.Sink;
 import org.apache.flink.cep.CEP;
 import org.apache.flink.cep.PatternSelectFunction;
 import org.apache.flink.cep.PatternStream;
 import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.connector.file.sink.FileSink;
+import org.apache.flink.core.fs.Path;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.functions.sink.filesystem.rollingpolicies.DefaultRollingPolicy;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -32,11 +37,22 @@ public class FlinkCEPTransactionDetector {
     public static void main(String[] args) throws Exception {
         LOG.info(">>> FlinkCEPTransactionDetector starting...");
 
-        // Set up the execution environment
         StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(new Configuration());
-        env.setParallelism(1);  // For easier debugging
+        env.setParallelism(1);
 
-        // Define pattern
+        // FileSink to write alerts to log file directory
+        Sink<String> alertSink = FileSink
+            .forRowFormat(new Path("transaction_alerts.log"), new SimpleStringEncoder<String>("UTF-8"))
+            .withRollingPolicy(
+                DefaultRollingPolicy.builder()
+                    .withRolloverInterval(Duration.ofMinutes(5))
+                    .withInactivityInterval(Duration.ofMinutes(1))
+                    .withMaxPartSize(128 * 1024 * 1024) // 128 MB
+                    .build()
+            )
+            .build();
+
+        // Define CEP pattern
         Pattern<Transaction, ?> pattern = Pattern.<Transaction>begin("first")
             .where(new SimpleCondition<Transaction>() {
                 @Override
@@ -73,7 +89,7 @@ public class FlinkCEPTransactionDetector {
             })
             .within(Time.hours(1));
 
-        // Read transactions from file
+        // Read and parse input file
         DataStream<String> input = env.readTextFile("data/transactions_bulk.csv");
 
         DataStream<Transaction> transactions = input
@@ -97,41 +113,42 @@ public class FlinkCEPTransactionDetector {
                     .withTimestampAssigner((event, timestamp) -> event.getTimestamp())
             );
 
-        // ✅ Key the stream before applying pattern
         PatternStream<Transaction> patternStream = CEP.pattern(
             transactions.keyBy(Transaction::getAccountId),
             pattern
         );
 
-        patternStream.select(new PatternSelectFunction<Transaction, String>() {
-            @Override
-            public String select(Map<String, List<Transaction>> pattern) {
-                List<Transaction> matched = new ArrayList<>();
-                matched.addAll(pattern.getOrDefault("first", List.of()));
-                matched.addAll(pattern.getOrDefault("second", List.of()));
-                matched.addAll(pattern.getOrDefault("third", List.of()));
+        DataStream<String> alerts = patternStream
+            .select(new PatternSelectFunction<Transaction, String>() {
+                @Override
+                public String select(Map<String, List<Transaction>> pattern) {
+                    List<Transaction> matched = new ArrayList<>();
+                    matched.addAll(pattern.getOrDefault("first", List.of()));
+                    matched.addAll(pattern.getOrDefault("second", List.of()));
+                    matched.addAll(pattern.getOrDefault("third", List.of()));
 
-                String accountId = matched.get(0).getAccountId();
-                double total = matched.stream().mapToDouble(Transaction::getAmount).sum();
+                    String accountId = matched.get(0).getAccountId();
+                    double total = matched.stream().mapToDouble(Transaction::getAmount).sum();
 
-                LOG.info("Pattern match:");
-                for (Transaction t : matched) {
-                    LocalDateTime time = LocalDateTime.ofInstant(Instant.ofEpochMilli(t.getTimestamp()), ZoneId.systemDefault());
-                    LOG.info("  Account={}, Amount={}, Time={}", t.getAccountId(), t.getAmount(), time);
+                    for (Transaction t : matched) {
+                        LocalDateTime time = LocalDateTime.ofInstant(Instant.ofEpochMilli(t.getTimestamp()), ZoneId.systemDefault());
+                        LOG.info("Transaction: Account={}, Amount={}, Time={}", t.getAccountId(), t.getAmount(), time);
+                    }
+
+                    if (total >= ALERT_THRESHOLD) {
+                        String alert = String.format("ALERT: Account %s total $%.2f", accountId, total);
+                        LOG.info(alert);
+                        return alert;
+                    }
+                    return null;
                 }
+            })
+            .filter(alert -> alert != null);
 
-                if (total >= ALERT_THRESHOLD) {
-                    String alert = String.format("ALERT: Account %s total $%.2f", accountId, total);
-                    LOG.info(alert);
-                    return alert;
-                }
-                return null;
-            }
-        })
-        .filter(alert -> alert != null)
-        .print();
+        alerts.print();         // Optional: log to console
+        alerts.sinkTo(alertSink); // ✅ Save to file
 
-        // Run the Flink job
         env.execute("Flink CEP Transaction Detector");
     }
 }
+
