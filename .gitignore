@@ -1,2 +1,5 @@
 /cep_bat_output.log
 /cep_output.log
+target/original-flink-cep-transactions-1.0.jar
+target/flink-cep-transactions-1.0.jar
+target/classes/com/example/config/FlinkJobConfig.class
