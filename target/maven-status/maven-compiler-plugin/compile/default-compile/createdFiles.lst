@@ -1,8 +1,10 @@
+com\example\FlinkCEPTransactionDetector$5.class
 com\example\FlinkCEPTransactionDetector$2.class
+com\example\Transaction.class
 com\example\FlinkCEPTransactionDetector.class
 com\example\config\FlinkJobConfig.class
 com\example\FlinkCEPTransactionDetector$3.class
 com\example\source\TransactionSourceFactory.class
 com\example\TestMain.class
 com\example\FlinkCEPTransactionDetector$1.class
-com\example\FlinkCEPTransactionDetector$Transaction.class
+com\example\FlinkCEPTransactionDetector$4.class

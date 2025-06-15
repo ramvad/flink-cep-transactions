@@ -40,6 +40,15 @@ public class FlinkCEPTransactionDetector {
         StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(new Configuration());
         env.setParallelism(1);
 
+        // Read input path from command line, default if not provided
+        final String inputPath;
+        if (args.length >= 1) {
+            inputPath = args[0];
+        } else {
+            inputPath = "data/transactions_bulk.csv";
+            LOG.warn("No input path provided, defaulting to {}", inputPath);
+        }
+
         // FileSink to write alerts to log file directory
         Sink<String> alertSink = FileSink
             .forRowFormat(new Path("transaction_alerts.log"), new SimpleStringEncoder<String>("UTF-8"))
@@ -90,7 +99,9 @@ public class FlinkCEPTransactionDetector {
             .within(Time.hours(1));
 
         // Read and parse input file
-        DataStream<String> input = env.readTextFile("data/transactions_bulk.csv");
+     //   DataStream<String> input = env.readTextFile("data/transactions_bulk.csv");
+        // Read and parse input file from CLI
+        DataStream<String> input = env.readTextFile(inputPath);
 
         DataStream<Transaction> transactions = input
             .filter(line -> !line.startsWith("timestamp"))
