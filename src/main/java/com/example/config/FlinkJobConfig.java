@@ -21,7 +21,7 @@ public class FlinkJobConfig {
         }
         
         // Fallback to default path
-        return Paths.get("data", "transactions.csv");
+        return Paths.get("data", "transactions_bulk.csv");
     }
 
     public Path getDataPath() {

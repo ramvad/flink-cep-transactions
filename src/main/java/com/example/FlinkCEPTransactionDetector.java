@@ -7,122 +7,131 @@ import org.apache.flink.cep.PatternSelectFunction;
 import org.apache.flink.cep.PatternStream;
 import org.apache.flink.cep.pattern.Pattern;
 import org.apache.flink.cep.pattern.conditions.SimpleCondition;
-import org.apache.flink.connector.file.src.FileSource;
-import org.apache.flink.connector.file.src.reader.TextLineFormat;
-import org.apache.flink.core.fs.Path;
+import org.apache.flink.configuration.Configuration;
 import org.apache.flink.streaming.api.datastream.DataStream;
-import org.apache.flink.streaming.api.datastream.SingleOutputStreamOperator;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.windowing.time.Time;
-import org.slf4j.LoggerFactory;
-
-import com.example.config.FlinkJobConfig;
-import com.example.source.TransactionSourceFactory;
 
 import org.slf4j.Logger;
-import org.apache.flink.configuration.Configuration;
+import org.slf4j.LoggerFactory;
 
 import java.lang.invoke.MethodHandles;
 import java.time.Duration;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.time.format.DateTimeFormatter;
+import java.time.Instant;
+import java.util.ArrayList;
 import java.util.List;
+import java.util.Map;
 
 public class FlinkCEPTransactionDetector {
-
-     private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
-
-    public static class Transaction {
-        public String accountId;
-        public double amount;
-        public long timestamp;
-
-        public Transaction() {}
-
-        public Transaction(String accountId, double amount, long timestamp) {
-            this.accountId = accountId;
-            this.amount = amount;
-            this.timestamp = timestamp;
-        }
-
-        @Override
-        public String toString() {
-            return accountId + "," + amount + "," + timestamp;
-        }
-    }
+    private static final Logger LOG = LoggerFactory.getLogger(MethodHandles.lookup().lookupClass());
+    private static final double ALERT_THRESHOLD = 1000.0;
 
     public static void main(String[] args) throws Exception {
-
         LOG.info(">>> FlinkCEPTransactionDetector starting...");
-        
-      FlinkJobConfig config = new FlinkJobConfig();
-        StreamExecutionEnvironment env = StreamExecutionEnvironment
-            .createLocalEnvironmentWithWebUI(config.getFlinkConfig());
 
-        FileSource<String> fileSource = TransactionSourceFactory.createSource(config.getDataPath());
+        // Set up the execution environment
+        StreamExecutionEnvironment env = StreamExecutionEnvironment.createLocalEnvironmentWithWebUI(new Configuration());
+        env.setParallelism(1);  // For easier debugging
 
-        // Create data stream from source, process once
-        DataStream<String> input = env.fromSource(
-                fileSource,
-                WatermarkStrategy.noWatermarks(),
-                "file-source"
-        );
+        // Define pattern
+        Pattern<Transaction, ?> pattern = Pattern.<Transaction>begin("first")
+            .where(new SimpleCondition<Transaction>() {
+                @Override
+                public boolean filter(Transaction t) {
+                    LOG.debug("First event: Account={}, Amount={}", t.getAccountId(), t.getAmount());
+                    return true;
+                }
+            })
+            .next("second")
+            .where(new org.apache.flink.cep.pattern.conditions.IterativeCondition<Transaction>() {
+                @Override
+                public boolean filter(Transaction t2, Context<Transaction> ctx) throws Exception {
+                    for (Transaction t : ctx.getEventsForPattern("first")) {
+                        if (t2.getAccountId().equals(t.getAccountId())) {
+                            LOG.debug("Second event matches Account={}", t2.getAccountId());
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            })
+            .next("third")
+            .where(new org.apache.flink.cep.pattern.conditions.IterativeCondition<Transaction>() {
+                @Override
+                public boolean filter(Transaction t3, Context<Transaction> ctx) throws Exception {
+                    for (Transaction t : ctx.getEventsForPattern("first")) {
+                        if (t3.getAccountId().equals(t.getAccountId())) {
+                            LOG.debug("Third event matches Account={}", t3.getAccountId());
+                            return true;
+                        }
+                    }
+                    return false;
+                }
+            })
+            .within(Time.hours(1));
 
-        input.print("RAW INPUT");
+        // Read transactions from file
+        DataStream<String> input = env.readTextFile("data/transactions_bulk.csv");
 
         DataStream<Transaction> transactions = input
-                .filter(line -> !line.startsWith("timestamp"))
-                .map((MapFunction<String, Transaction>) line -> {
+            .filter(line -> !line.startsWith("timestamp"))
+            .map(new MapFunction<String, Transaction>() {
+                @Override
+                public Transaction map(String line) {
                     String[] fields = line.split(",");
-                    long ts = java.sql.Timestamp.valueOf(fields[0]).getTime();
-                    return new Transaction(fields[1], Double.parseDouble(fields[2]), ts);
-                })
-                .assignTimestampsAndWatermarks(
-                        WatermarkStrategy.<Transaction>forBoundedOutOfOrderness(Duration.ofSeconds(5))
-                                .withTimestampAssigner((event, ts) -> event.timestamp)
-                );
-
-        Pattern<Transaction, ?> pattern = Pattern.<Transaction>begin("first")
-                .where(new SimpleCondition<Transaction>() {
-                    @Override
-                    public boolean filter(Transaction t) {
-                        return t.amount > 0;
-                    }
-                })
-                .next("second")
-                .where(new SimpleCondition<Transaction>() {
-                    @Override
-                    public boolean filter(Transaction t) {
-                        return t.amount > 0;
-                    }
-                })
-                .next("third")
-                .where(new SimpleCondition<Transaction>() {
-                    @Override
-                    public boolean filter(Transaction t) {
-                        return t.amount > 0;
-                    }
-                })
-                .within(Time.hours(1));
-
-        PatternStream<Transaction> patternStream = CEP.pattern(transactions.keyBy(t -> t.accountId), pattern);
-
-        SingleOutputStreamOperator<String> alerts = patternStream.select(
-                (PatternSelectFunction<Transaction, String>) patternMatch -> {
-                    List<Transaction> events = List.of(
-                            patternMatch.get("first").get(0),
-                            patternMatch.get("second").get(0),
-                            patternMatch.get("third").get(0)
-                    );
-                    double total = events.stream().mapToDouble(e -> e.amount).sum();
-                    if (total > 1000.0) {
-                        return "ALERT: " + events.get(0).accountId + " total $" + total;
-                    }
-                    return null;
+                    String accountId = fields[1];
+                    double amount = Double.parseDouble(fields[2]);
+                    long timestamp = LocalDateTime.parse(fields[0], DateTimeFormatter.ofPattern("yyyy-MM-dd HH:mm:ss"))
+                            .atZone(ZoneId.systemDefault())
+                            .toInstant()
+                            .toEpochMilli();
+                    LOG.debug("Parsed: Account={}, Amount={}, Timestamp={}", accountId, amount, fields[0]);
+                    return new Transaction(accountId, amount, timestamp);
                 }
-        ).filter(msg -> msg != null);
+            })
+            .assignTimestampsAndWatermarks(
+                WatermarkStrategy.<Transaction>forBoundedOutOfOrderness(Duration.ofSeconds(1))
+                    .withTimestampAssigner((event, timestamp) -> event.getTimestamp())
+            );
 
-        alerts.print("ALERTS");
+        // ✅ Key the stream before applying pattern
+        PatternStream<Transaction> patternStream = CEP.pattern(
+            transactions.keyBy(Transaction::getAccountId),
+            pattern
+        );
 
-        env.execute("Flink CEP Transaction Pattern");
-        LOG.info(">>> FlinkCEPTransactionDetector ending");
+        patternStream.select(new PatternSelectFunction<Transaction, String>() {
+            @Override
+            public String select(Map<String, List<Transaction>> pattern) {
+                List<Transaction> matched = new ArrayList<>();
+                matched.addAll(pattern.getOrDefault("first", List.of()));
+                matched.addAll(pattern.getOrDefault("second", List.of()));
+                matched.addAll(pattern.getOrDefault("third", List.of()));
+
+                String accountId = matched.get(0).getAccountId();
+                double total = matched.stream().mapToDouble(Transaction::getAmount).sum();
+
+                LOG.info("Pattern match:");
+                for (Transaction t : matched) {
+                    LocalDateTime time = LocalDateTime.ofInstant(Instant.ofEpochMilli(t.getTimestamp()), ZoneId.systemDefault());
+                    LOG.info("  Account={}, Amount={}, Time={}", t.getAccountId(), t.getAmount(), time);
+                }
+
+                if (total >= ALERT_THRESHOLD) {
+                    String alert = String.format("ALERT: Account %s total $%.2f", accountId, total);
+                    LOG.info(alert);
+                    return alert;
+                }
+                return null;
+            }
+        })
+        .filter(alert -> alert != null)
+        .print();
+
+        // Run the Flink job
+        env.execute("Flink CEP Transaction Detector");
     }
 }
